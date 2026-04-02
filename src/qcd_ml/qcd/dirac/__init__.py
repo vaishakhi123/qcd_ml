@@ -106,3 +106,84 @@ class dirac_wilson_clover:
                                )
 
         return result - self.csw / 4 * improvement
+
+class dirac_staggered:
+    """
+    Staggered Dirac operator with optional fat links.
+    """
+
+    def __init__(self, U, mass_parameter):
+        """
+        U: gauge field (4, Nx, Ny, Nz, Nt, 3, 3)
+        mass_parameter: fermion mass
+        """
+        self.U = U
+        self.mass_parameter = mass_parameter
+
+        # device
+        self.device = get_device_by_reference(U[0])
+
+        # lattice sizes
+        self.Lx, self.Ly, self.Lz, self.Lt = U.shape[1:5]
+
+        # precompute staggered phases
+        self.eta = self._compute_eta().to(self.device)
+
+    def _compute_eta(self):
+        x = torch.arange(self.Lx).view(-1,1,1,1)
+        y = torch.arange(self.Ly).view(1,-1,1,1)
+        z = torch.arange(self.Lz).view(1,1,-1,1)
+        t = torch.arange(self.Lt).view(1,1,1,-1)
+    
+        eta = torch.ones((4, self.Lx, self.Ly, self.Lz, self.Lt), dtype=torch.cdouble)
+        # eta_0 = 1 (no preceding coordinates)
+        eta[1] = (-1) ** (x)              # sum of coords[:1] = x
+        eta[2] = (-1) ** (x + y)          # sum of coords[:2]
+        eta[3] = (-1) ** (x + y + z)      # sum of coords[:3]
+        return eta
+    # def _compute_eta(self):
+    #     """
+    #     Compute staggered phase factors eta_mu(x)
+    #     shape: (4, Nx, Ny, Nz, Nt)
+    #     """
+    #     eta = torch.ones((4, self.Lx, self.Ly, self.Lz, self.Lt), dtype=torch.cdouble)
+
+    #     for x in range(self.Lx):
+    #         for y in range(self.Ly):
+    #             for z in range(self.Lz):
+    #                 for t in range(self.Lt):
+    #                     coords = [x, y, z, t]
+    #                     for mu in range(4):
+    #                         phase = sum(coords[:mu]) % 2
+    #                         if phase == 1:
+    #                             eta[mu, x, y, z, t] = -1
+
+    #     return eta
+
+
+    def __call__(self, v):
+        """
+        Apply staggered Dirac operator.
+        v: fermion field (Nx, Ny, Nz, Nt, Nc)
+        """
+        result = self.mass_parameter * v
+
+        for mu in range(4):
+            # forward hop
+            forward = v_hop(self.U, mu, 1, v)
+
+            # backward hop
+            backward = v_hop(self.U, mu, -1, v)
+
+            # apply staggered phase
+            eta_mu = self.eta[mu].unsqueeze(-1)  # match color dim
+
+            result += eta_mu * (forward - backward) / 2
+            # eta_fwd = self . eta [ mu ]. unsqueeze ( -1)
+            # #shift eta back by 1 along dimension mu to get eta ( x -
+            # mu_hat )
+            # eta_bwd = torch . roll ( self . eta [ mu ] , shifts =1 , dims = mu ) .
+            # unsqueeze ( -1)
+            # result += ( eta_fwd * forward - eta_bwd * backward ) / 2
+
+        return result
