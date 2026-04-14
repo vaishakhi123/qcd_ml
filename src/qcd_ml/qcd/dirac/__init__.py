@@ -3,6 +3,8 @@ import torch
 from ..static import gamma
 from ...base.operations import v_spin_const_transform, mspin_const_group_compose
 from ...base.hop import v_hop
+from ...base.hop import stag_hop
+from ...base.hop import naik
 from ...base.paths import PathBuffer
 
 from ...util.comptime import comptime
@@ -206,38 +208,6 @@ class dirac_staggered:
         eta[3] = (-1.0) ** (x0 + x1 + x2)
         return eta
 
-    # ── Single hop transport ────────────────────────────────────────────────
-
-    def _hop_forward(self, psi, mu, U):
-        """U_mu(x) * psi(x + mu_hat)"""
-        psi_shifted = torch.roll(psi, shifts=-1, dims=mu)
-        return torch.einsum("...ab,...b->...a", U[mu], psi_shifted)
-
-    def _hop_backward(self, psi, mu, U):
-        """U_mu†(x - mu_hat) * psi(x - mu_hat)"""
-        U_dag     = U[mu].conj().transpose(-2, -1)
-        U_shifted = torch.roll(U_dag,  shifts=+1, dims=mu)
-        p_shifted = torch.roll(psi,    shifts=+1, dims=mu)
-        return torch.einsum("...ab,...b->...a", U_shifted, p_shifted)
-
-    # ── Naik 3-link transport ───────────────────────────────────────────────
-
-    def _naik_forward(self, psi, mu):
-        """U_thin(x) U_thin(x+mu) U_thin(x+2mu) psi(x+3mu)"""
-        tmp = self._hop_forward(psi, mu, self.U_thin)
-        tmp = self._hop_forward(tmp, mu, self.U_thin)
-        tmp = self._hop_forward(tmp, mu, self.U_thin)
-        return tmp
-
-    def _naik_backward(self, psi, mu):
-        """U_thin†(x-mu) U_thin†(x-2mu) U_thin†(x-3mu) psi(x-3mu)"""
-        tmp = self._hop_backward(psi, mu, self.U_thin)
-        tmp = self._hop_backward(tmp, mu, self.U_thin)
-        tmp = self._hop_backward(tmp, mu, self.U_thin)
-        return tmp
-
-    # ── Full operator ───────────────────────────────────────────────────────
-
     def __call__(self, psi):
         """
         psi shape: (Lx, Ly, Lz, Lt, 3)
@@ -251,14 +221,14 @@ class dirac_staggered:
 
             # 1-link term — uses fat links
             if self.c1 != 0.0:
-                fwd = self._hop_forward( psi, mu, self.U_fat)
-                bwd = self._hop_backward(psi, mu, self.U_fat)
+                fwd = stag_hop(self.U_fat, mu, -1, psi) 
+                bwd = stag_hop(self.U_fat, mu, +1, psi)
                 result = result + (self.c1 / 2/u0) * eta_mu * (fwd - bwd)
 
             # Naik 3-link term — uses thin links
             if self.c2 != 0.0:
-                fwd3 = self._naik_forward( psi, mu)
-                bwd3 = self._naik_backward(psi, mu)
+                fwd3 = naik(self.U_thin, mu, -1, psi)
+                bwd3 = naik(self.U_thin, mu, +1, psi)
                 result = result + (self.c2 / (2*u0**3)) * eta_mu * (fwd3 - bwd3)
 
 
