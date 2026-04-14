@@ -107,83 +107,159 @@ class dirac_wilson_clover:
 
         return result - self.csw / 4 * improvement
 
+
+
 class dirac_staggered:
     """
-    Staggered Dirac operator with optional fat links.
+    Kogut-Susskind staggered Dirac operator with separate thin and fat links arXiv:hep-lat/9712010v2.
+
+    Implements:
+        D psi(x) = m * psi(x)
+                 + sum_mu eta_mu(x) * c1/2 * [U_fat_mu(x) psi(x+mu) 
+                                               - U_fat_mu†(x-mu) psi(x-mu)]
+                 + sum_mu eta_mu(x) * c2/2 * [U_thin(x)U_thin(x+mu)U_thin(x+2mu) psi(x+3mu)
+                                               - U_thin†(x-mu)U_thin†(x-2mu)U_thin†(x-3mu) psi(x-3mu)]
+
+    Mirrors GPT convention:
+        g.qcd.fermion.staggered(U_thin + U_fat, mass, c1, c2, u0)
+        first 4 links  → U_thin  (Naik 3-link term)
+        next  4 links  → U_fat   (1-link term)
+
+    Usage:
+        # naive staggered (no smearing, no Naik)
+        D = dirac_staggered(U, U, mass=0.1, c1=1.0, c2=0.0)
+
+        # improved staggered (fat 1-link + Naik)
+        D = dirac_staggered(U_thin, U_fat, mass=0.1, c1=9/8, c2=-1/24)
+
+        # naive shorthand (thin=fat=U)
+        D = dirac_staggered.naive(U, mass=0.1)
+
+        # from GPT-style combined list (8 links)
+        D = dirac_staggered.from_combined(U_combined, mass=0.1, c1=9/8, c2=-1/24)
     """
 
-    def __init__(self, U, mass_parameter):
+    def __init__(self, U_thin, U_fat, mass, u0, c1=1.0, c2=0.0):
         """
-        U: gauge field (4, Nx, Ny, Nz, Nt, 3, 3)
-        mass_parameter: fermion mass
+        U_thin: gauge links for Naik 3-link term, shape (4, Lx, Ly, Lz, Lt, 3, 3)
+        U_fat:  gauge links for 1-link term,      shape (4, Lx, Ly, Lz, Lt, 3, 3)
+        mass:   fermion mass
+        c1:     1-link coefficient  (1.0 for naive, 9/8 for Naik-improved)
+        c2:     3-link coefficient  (0.0 for naive, -1/24 for Naik-improved)
         """
-        self.U = U
-        self.mass_parameter = mass_parameter
+        self.U_thin = U_thin
+        self.U_fat  = U_fat
+        self.mass   = mass
+        self.c1     = c1
+        self.c2     = c2
+        self.u0     = u0
 
-        # device
-        self.device = get_device_by_reference(U[0])
+        self.lattice_sizes = U_thin.shape[1:5]  # (Lx, Ly, Lz, Lt)
+        self.eta = self._compute_eta()
 
-        # lattice sizes
-        self.Lx, self.Ly, self.Lz, self.Lt = U.shape[1:5]
+    # ── Constructors ────────────────────────────────────────────────────────
 
-        # precompute staggered phases
-        self.eta = self._compute_eta().to(self.device)
+    @classmethod
+    def naive(cls, U, mass, u0):
+        """
+        Naive staggered — thin=fat=U, no Naik term.
+        Matches: g.qcd.fermion.staggered(U + U, mass, c1=1.0, c2=0.0, u0=1.0)
+        """
+        return cls(U, U, mass, u0, c1=1.0, c2=0.0)
+
+    @classmethod
+    def from_combined(cls, U_combined, mass, u0, c1=9/8, c2=-1/24):
+        """
+        Build from GPT-style combined 8-link list/tensor.
+        U_combined: shape (8, Lx, Ly, Lz, Lt, 3, 3)
+                    first 4  → thin (Naik)
+                    next  4  → fat  (1-link)
+
+        Matches: g.qcd.fermion.staggered(U_thin + U_fat, mass, c1, c2, u0=1.0)
+        """
+        if isinstance(U_combined, (list, tuple)):
+            U_combined = torch.stack(U_combined)
+        U_thin = U_combined[:4]
+        U_fat  = U_combined[4:]
+        return cls(U_thin, U_fat, mass, u0, c1=c1, c2=c2)
+
+    # ── Staggered phases ────────────────────────────────────────────────────
 
     def _compute_eta(self):
-        x = torch.arange(self.Lx).view(-1,1,1,1)
-        y = torch.arange(self.Ly).view(1,-1,1,1)
-        z = torch.arange(self.Lz).view(1,1,-1,1)
-        t = torch.arange(self.Lt).view(1,1,1,-1)
-    
-        eta = torch.ones((4, self.Lx, self.Ly, self.Lz, self.Lt), dtype=torch.cdouble)
-        # eta_0 = 1 (no preceding coordinates)
-        eta[1] = (-1) ** (x)              # sum of coords[:1] = x
-        eta[2] = (-1) ** (x + y)          # sum of coords[:2]
-        eta[3] = (-1) ** (x + y + z)      # sum of coords[:3]
+        """
+        eta_0(x) = 1
+        eta_1(x) = (-1)^x0
+        eta_2(x) = (-1)^(x0+x1)
+        eta_3(x) = (-1)^(x0+x1+x2)
+        Shape: (4, Lx, Ly, Lz, Lt), real dtype matching U
+        """
+        Lx, Ly, Lz, Lt = self.lattice_sizes
+        x0 = torch.arange(Lx, device=self.U_thin.device).view(Lx,  1,  1,  1)
+        x1 = torch.arange(Ly, device=self.U_thin.device).view( 1, Ly,  1,  1)
+        x2 = torch.arange(Lz, device=self.U_thin.device).view( 1,  1, Lz,  1)
+
+        eta = torch.ones((4, Lx, Ly, Lz, Lt),
+                         dtype=self.U_thin.real.dtype,
+                         device=self.U_thin.device)
+        eta[1] = (-1.0) ** x0
+        eta[2] = (-1.0) ** (x0 + x1)
+        eta[3] = (-1.0) ** (x0 + x1 + x2)
         return eta
-    # def _compute_eta(self):
-    #     """
-    #     Compute staggered phase factors eta_mu(x)
-    #     shape: (4, Nx, Ny, Nz, Nt)
-    #     """
-    #     eta = torch.ones((4, self.Lx, self.Ly, self.Lz, self.Lt), dtype=torch.cdouble)
 
-    #     for x in range(self.Lx):
-    #         for y in range(self.Ly):
-    #             for z in range(self.Lz):
-    #                 for t in range(self.Lt):
-    #                     coords = [x, y, z, t]
-    #                     for mu in range(4):
-    #                         phase = sum(coords[:mu]) % 2
-    #                         if phase == 1:
-    #                             eta[mu, x, y, z, t] = -1
+    # ── Single hop transport ────────────────────────────────────────────────
 
-    #     return eta
+    def _hop_forward(self, psi, mu, U):
+        """U_mu(x) * psi(x + mu_hat)"""
+        psi_shifted = torch.roll(psi, shifts=-1, dims=mu)
+        return torch.einsum("...ab,...b->...a", U[mu], psi_shifted)
 
+    def _hop_backward(self, psi, mu, U):
+        """U_mu†(x - mu_hat) * psi(x - mu_hat)"""
+        U_dag     = U[mu].conj().transpose(-2, -1)
+        U_shifted = torch.roll(U_dag,  shifts=+1, dims=mu)
+        p_shifted = torch.roll(psi,    shifts=+1, dims=mu)
+        return torch.einsum("...ab,...b->...a", U_shifted, p_shifted)
 
-    def __call__(self, v):
+    # ── Naik 3-link transport ───────────────────────────────────────────────
+
+    def _naik_forward(self, psi, mu):
+        """U_thin(x) U_thin(x+mu) U_thin(x+2mu) psi(x+3mu)"""
+        tmp = self._hop_forward(psi, mu, self.U_thin)
+        tmp = self._hop_forward(tmp, mu, self.U_thin)
+        tmp = self._hop_forward(tmp, mu, self.U_thin)
+        return tmp
+
+    def _naik_backward(self, psi, mu):
+        """U_thin†(x-mu) U_thin†(x-2mu) U_thin†(x-3mu) psi(x-3mu)"""
+        tmp = self._hop_backward(psi, mu, self.U_thin)
+        tmp = self._hop_backward(tmp, mu, self.U_thin)
+        tmp = self._hop_backward(tmp, mu, self.U_thin)
+        return tmp
+
+    # ── Full operator ───────────────────────────────────────────────────────
+
+    def __call__(self, psi):
         """
-        Apply staggered Dirac operator.
-        v: fermion field (Nx, Ny, Nz, Nt, Nc)
+        psi shape: (Lx, Ly, Lz, Lt, 3)
+        returns:   (Lx, Ly, Lz, Lt, 3)
         """
-        result = self.mass_parameter * v
-
+        result = self.mass * psi
+        u0 = self.u0
+        
         for mu in range(4):
-            # forward hop
-            forward = v_hop(self.U, mu, 1, v)
+            eta_mu = self.eta[mu].unsqueeze(-1).to(psi.dtype)
 
-            # backward hop
-            backward = v_hop(self.U, mu, -1, v)
+            # 1-link term — uses fat links
+            if self.c1 != 0.0:
+                fwd = self._hop_forward( psi, mu, self.U_fat)
+                bwd = self._hop_backward(psi, mu, self.U_fat)
+                result = result + (self.c1 / 2/u0) * eta_mu * (fwd - bwd)
 
-            # apply staggered phase
-            eta_mu = self.eta[mu].unsqueeze(-1)  # match color dim
+            # Naik 3-link term — uses thin links
+            if self.c2 != 0.0:
+                fwd3 = self._naik_forward( psi, mu)
+                bwd3 = self._naik_backward(psi, mu)
+                result = result + (self.c2 / (2*u0**3)) * eta_mu * (fwd3 - bwd3)
 
-            result += eta_mu * (forward - backward) / 2
-            # eta_fwd = self . eta [ mu ]. unsqueeze ( -1)
-            # #shift eta back by 1 along dimension mu to get eta ( x -
-            # mu_hat )
-            # eta_bwd = torch . roll ( self . eta [ mu ] , shifts =1 , dims = mu ) .
-            # unsqueeze ( -1)
-            # result += ( eta_fwd * forward - eta_bwd * backward ) / 2
 
         return result
