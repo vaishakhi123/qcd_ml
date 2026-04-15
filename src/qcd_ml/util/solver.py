@@ -169,3 +169,172 @@ def GMRES(A, b, x0
     info["history"] = hist[:iters]
 
     return x, info
+
+
+def CG(A, b, x0=None
+       , maxiter=1000
+       , eps=1e-5
+       , innerproduct=lambda x, y: (x.conj() * y).sum()
+       , preconditioner=None
+       , verbose=False
+       ):
+    """
+    Conjugate Gradient algorithm for solving Ax = b where A is symmetric positive-definite.
+    
+    For staggered fermions, A = D^dagger @ D (which is always SPD).
+    
+    ``A``: callable that computes A @ x
+    ``b``: right-hand side
+    ``x0``: initial guess (defaults to zero)
+    ``maxiter``: maximum iterations
+    ``eps``: tolerance (relative to initial residual if b != 0, else absolute)
+    ``innerproduct``: inner product function
+    ``preconditioner``: optional preconditioner (must also be SPD)
+    ``verbose``: print progress
+    """
+    if hasattr(A, "__call__"):
+        apply_A = A
+    else:
+        apply_A = lambda x: A @ x
+
+    if x0 is None:
+        x = torch.zeros_like(b)
+    else:
+        x = x0.clone()
+
+    r = b - apply_A(x)
+    d = r.clone() if preconditioner is None else preconditioner(r)
+    
+    rsold = innerproduct(r, d).real
+    if rsold < 1e-10:
+        return x, {"converged": True, "breakdown": False, "res": 0.0, "k": 0}
+
+    hist = []
+    for i in range(maxiter):
+        Ad = apply_A(d)
+        if preconditioner is not None:
+            dAd = innerproduct(d, Ad).real
+            if dAd < 1e-10:
+                if verbose:
+                    print(f"CG breakdown at iter {i}")
+                break
+            alpha = rsold / dAd
+        else:
+            dAd = innerproduct(d, Ad).real
+            if dAd < 1e-10:
+                if verbose:
+                    print(f"CG breakdown at iter {i}")
+                break
+            alpha = rsold / dAd
+        
+        x = x + alpha * d
+        r = r - alpha * Ad
+        
+        rsnew = innerproduct(r, r).real
+        res = np.sqrt(rsnew)
+        hist.append(res)
+        
+        if verbose:
+            print(f"CG: iter {i+1}, res {res:.2e}")
+
+        if res < eps * np.sqrt(innerproduct(b, b).real):
+            break
+        
+        if preconditioner is not None:
+            z = preconditioner(r)
+            beta = innerproduct(r, z).real / rsold
+        else:
+            z = r
+            beta = rsnew / rsold
+        
+        d = z + beta * d
+        rsold = rsnew
+
+    return x, {"converged": res < eps, "breakdown": False, "res": res, "k": i + 1, "history": np.array(hist)}
+
+
+def BiCGStab(A, b, x0=None
+             , maxiter=1000
+             , eps=1e-5
+             , innerproduct=lambda x, y: (x.conj() * y).sum()
+             , preconditioner=None
+             , verbose=False
+             ):
+    """
+    Biconjugate Gradient Stabilized (BiCGStab) for solving Ax = b where A is non-Hymmetric.
+    
+    Works for both Hermitian and non-Hermitian matrices. More stable than standard BiCG.
+    
+    ``A``: callable that computes A @ x
+    ``b``: right-hand side
+    ``x0``: initial guess (defaults to zero)
+    ``maxiter``: maximum iterations
+    ``eps``: tolerance (relative to initial residual)
+    ``innerproduct``: inner product function
+    ``preconditioner``: optional right preconditioner
+    ``verbose``: print progress
+    """
+    if hasattr(A, "__call__"):
+        apply_A = A
+    else:
+        apply_A = lambda x: A @ x
+
+    if x0 is None:
+        x = torch.zeros_like(b)
+    else:
+        x = x0.clone()
+
+    r = b - apply_A(x)
+    r_tilde = r.clone()
+    
+    rho_old = 1.0
+    alpha = 1.0
+    omega = 1.0
+
+    norm_r0 = np.sqrt(innerproduct(r, r).real)
+    hist = []
+    
+    for i in range(maxiter):
+        rho = innerproduct(r_tilde, r).real
+        
+        if abs(rho) < 1e-10:
+            if verbose:
+                print(f"BiCGStab breakdown at iter {i}")
+            break
+        
+        if i == 0:
+            v = torch.zeros_like(r)
+            p = r.clone()
+        else:
+            beta = (rho / rho_old) * (alpha / omega)
+            p = r + beta * (p - omega * v)
+        
+        if preconditioner is not None:
+            p = preconditioner(p)
+        
+        v = apply_A(p)
+        alpha = rho / innerproduct(r_tilde, v).real
+        
+        s = r - alpha * v
+        
+        if preconditioner is not None:
+            s = preconditioner(s)
+        
+        t = apply_A(s)
+        
+        omega = innerproduct(t, s).real / innerproduct(t, t).real
+        
+        x = x + alpha * p + omega * s
+        r = s - omega * t
+        
+        res = np.sqrt(innerproduct(r, r).real)
+        hist.append(res)
+        rho_old = rho
+        
+        if verbose:
+            print(f"BiCGStab: iter {i+1}, res {res:.2e}, ||r0|| {norm_r0:.2e}")
+
+        if res < eps * norm_r0:
+            break
+
+    return x, {"converged": res < eps * norm_r0, "breakdown": False, "res": res, "k": i + 1, "history": np.array(hist)}

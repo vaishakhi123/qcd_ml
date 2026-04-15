@@ -1,7 +1,7 @@
 import torch
 
 from ..static import gamma
-from ...base.operations import v_spin_const_transform, mspin_const_group_compose
+from ...base.operations import v_spin_const_transform, mspin_const_group_compose, make_eta
 from ...base.hop import v_hop
 from ...base.hop import stag_hop
 from ...base.hop import naik
@@ -157,7 +157,7 @@ class dirac_staggered:
         self.u0     = u0
 
         self.lattice_sizes = U_thin.shape[1:5]  # (Lx, Ly, Lz, Lt)
-        self.eta = self._compute_eta()
+        self.eta = make_eta(self.lattice_sizes, U_thin.device, U_thin.real.dtype)
 
     # ── Constructors ────────────────────────────────────────────────────────
 
@@ -185,51 +185,40 @@ class dirac_staggered:
         U_fat  = U_combined[4:]
         return cls(U_thin, U_fat, mass, u0, c1=c1, c2=c2)
 
-    # ── Staggered phases ────────────────────────────────────────────────────
 
-    def _compute_eta(self):
-        """
-        eta_0(x) = 1
-        eta_1(x) = (-1)^x0
-        eta_2(x) = (-1)^(x0+x1)
-        eta_3(x) = (-1)^(x0+x1+x2)
-        Shape: (4, Lx, Ly, Lz, Lt), real dtype matching U
-        """
-        Lx, Ly, Lz, Lt = self.lattice_sizes
-        x0 = torch.arange(Lx, device=self.U_thin.device).view(Lx,  1,  1,  1)
-        x1 = torch.arange(Ly, device=self.U_thin.device).view( 1, Ly,  1,  1)
-        x2 = torch.arange(Lz, device=self.U_thin.device).view( 1,  1, Lz,  1)
-
-        eta = torch.ones((4, Lx, Ly, Lz, Lt),
-                         dtype=self.U_thin.real.dtype,
-                         device=self.U_thin.device)
-        eta[1] = (-1.0) ** x0
-        eta[2] = (-1.0) ** (x0 + x1)
-        eta[3] = (-1.0) ** (x0 + x1 + x2)
-        return eta
-
-    def __call__(self, psi):
+    def __call__(self, psi, adjoint=False):
         """
         psi shape: (Lx, Ly, Lz, Lt, 3)
         returns:   (Lx, Ly, Lz, Lt, 3)
+        
+        adjoint: if True, applies D^dagger instead of D
         """
         result = self.mass * psi
         u0 = self.u0
         
         for mu in range(4):
             eta_mu = self.eta[mu].unsqueeze(-1).to(psi.dtype)
+            if adjoint:
+                eta_mu = torch.roll(eta_mu, shifts=+1, dims=mu)
 
             # 1-link term — uses fat links
             if self.c1 != 0.0:
-                fwd = stag_hop(self.U_fat, mu, -1, psi) 
-                bwd = stag_hop(self.U_fat, mu, +1, psi)
+                if adjoint:
+                    fwd = stag_hop(self.U_fat, mu, +1, psi) 
+                    bwd = stag_hop(self.U_fat, mu, -1, psi)
+                else:
+                    fwd = stag_hop(self.U_fat, mu, -1, psi) 
+                    bwd = stag_hop(self.U_fat, mu, +1, psi)
                 result = result + (self.c1 / 2/u0) * eta_mu * (fwd - bwd)
 
             # Naik 3-link term — uses thin links
             if self.c2 != 0.0:
-                fwd3 = naik(self.U_thin, mu, -1, psi)
-                bwd3 = naik(self.U_thin, mu, +1, psi)
+                if adjoint:
+                    fwd3 = naik(self.U_thin, mu, +1, psi)
+                    bwd3 = naik(self.U_thin, mu, -1, psi)
+                else:
+                    fwd3 = naik(self.U_thin, mu, -1, psi)
+                    bwd3 = naik(self.U_thin, mu, +1, psi)
                 result = result + (self.c2 / (2*u0**3)) * eta_mu * (fwd3 - bwd3)
-
 
         return result

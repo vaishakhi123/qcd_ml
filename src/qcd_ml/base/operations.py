@@ -22,6 +22,26 @@ See also: :ref:`doc-datatypes:qcd_ml Datatypes`.
 import torch
 
 
+def make_eta(lattice_sizes, device, dtype):
+    """
+    Staggered phase factors eta_mu(x):
+        eta_0(x) = 1
+        eta_1(x) = (-1)^x0
+        eta_2(x) = (-1)^(x0+x1)
+        eta_3(x) = (-1)^(x0+x1+x2)
+    Returns tensor shape (4, Lx, Ly, Lz, Lt).
+    """
+    Lx, Ly, Lz, Lt = lattice_sizes
+    x0 = torch.arange(Lx, device=device).view(Lx,  1,  1,  1)
+    x1 = torch.arange(Ly, device=device).view( 1, Ly,  1,  1)
+    x2 = torch.arange(Lz, device=device).view( 1,  1, Lz,  1)
+
+    eta = torch.ones(4, Lx, Ly, Lz, Lt, dtype=dtype, device=device)
+    eta[1] = (-1.0) ** x0
+    eta[2] = (-1.0) ** (x0 + x1)
+    eta[3] = (-1.0) ** (x0 + x1 + x2)
+    return eta
+
 def _mul(iterable):
     res = 1
     for i in iterable:
@@ -123,3 +143,36 @@ def m_gauge_transform(Umu, m):
     Umu_reshaped = Umu.reshape((vol, *(Umu.shape[4:])))
     return torch.bmm(torch.bmm(Umu_reshaped
                      , m.reshape((vol, *(m.shape[4:])))), Umu_reshaped.adjoint()).reshape(old_shape)
+
+
+def stag_v_gauge_transform(Umu, v):
+    """
+    Gauge transformation for staggered vector fields.
+    Field shape: (n_features, Lx, Ly, Lz, Lt, 3)
+    U shape:     (Lx, Ly, Lz, Lt, 3, 3)
+    """
+    vol = 1
+    for s in v.shape[1:5]:
+        vol *= s
+    n_feat = v.shape[0]
+    Umu_3x3 = Umu.reshape((vol, 3, 3))
+    v_perm = v.permute(1, 2, 3, 4, 5, 0).reshape((vol, 3, n_feat))
+    result = torch.bmm(Umu_3x3, v_perm)
+    return result.reshape((v.shape[1], v.shape[2], v.shape[3], v.shape[4], 3, n_feat)).permute(5, 0, 1, 2, 3, 4)
+
+
+def stag_m_gauge_transform(Umu, m):
+    """
+    Gauge transformation for staggered matrix fields.
+    Field shape: (n_features, Lx, Ly, Lz, Lt, 3, 3)
+    U shape:     (Lx, Ly, Lz, Lt, 3, 3)
+    """
+    vol = 1
+    for s in m.shape[1:5]:
+        vol *= s
+    n_feat = m.shape[0]
+    Umu_3x3 = Umu.reshape((vol, 3, 3))
+    m_perm = m.permute(1, 2, 3, 4, 5, 6, 0).reshape((vol, 3, 3 * n_feat))
+    temp = torch.bmm(Umu_3x3, m_perm.reshape((vol, 3, 3)))
+    result = torch.bmm(temp, Umu_3x3.adjoint())
+    return result.reshape((m.shape[1], m.shape[2], m.shape[3], m.shape[4], 3, 3, n_feat)).permute(6, 0, 1, 2, 3, 4, 5)

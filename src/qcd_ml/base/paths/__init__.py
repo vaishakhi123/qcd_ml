@@ -9,7 +9,8 @@ The function ``v_evaluate_path`` is memory effective but slow.
 The class ``PathBuffer`` can be used to speed up path evaluation
 but may be more memory intensve.
 
-
+For staggered fermions, use ``StaggeredPathBuffer`` which includes
+staggered phase factors eta_mu(x) at each hop.
 """
 
 from .simple_paths import (
@@ -17,6 +18,7 @@ from .simple_paths import (
         )
 
 from .path_buffer import PathBuffer
+from .staggered_path_buffer import StaggeredPathBuffer
 
 
 def path_get_orig_point(path):
