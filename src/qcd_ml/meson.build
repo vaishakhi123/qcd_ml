@@ -10,7 +10,7 @@ python.install_sources(
   subdir: 'qcd_ml/base'
 )
 python.install_sources(
-  'base/paths/__init__.py', 'base/paths/simple_paths.py', 'base/paths/path_buffer.py', 'base/paths/compile.py',
+  'base/paths/__init__.py', 'base/paths/simple_paths.py', 'base/paths/path_buffer.py', 'base/paths/compile.py', 'base/paths/staggered_path_buffer.py',
   pure: true,
   subdir: 'qcd_ml/base/paths'
 )
@@ -33,7 +33,7 @@ python.install_sources(
 )
 
 python.install_sources(
-  'nn/__init__.py', 'nn/ptc.py', 'nn/lptc.py', 'nn/pt.py', 'nn/dense.py',
+  'nn/__init__.py', 'nn/ptc.py', 'nn/lptc.py', 'nn/pt.py', 'nn/dense.py', 'nn/dense_staggered.py', 'nn/pt_staggered.py', 'nn/s_pt_buffer.py', 'nn/staggered_preconditioner.py',
   pure: true,
   subdir: 'qcd_ml/nn'
 )
